@@ -1,4 +1,4 @@
-name: Build All Platforms
+name: Build Windows and Linux
 
 on:
   push:
@@ -17,18 +17,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15-intel
-            platform: mac
-            artifact_name: VoiceTransleter-V2-macOS
-          - os: macos-14
-            platform: mac-arm
-            artifact_name: VoiceTransleter-V2-macOS-ARM
+          # macOS убран из сборки: этот форк ориентирован на CUDA-инференс
+          # (NVIDIA GPU), которого физически нет ни на Intel Mac, ни на
+          # Apple Silicon. Сборка под macOS давала бы CPU-only версию без
+          # преимуществ форка — не вводим пользователей в заблуждение.
           - os: ubuntu-22.04
             platform: linux
-            artifact_name: VoiceTransleter-V2-Linux
+            artifact_name: VoiceTransleter-V2-CUDA-Linux
           - os: windows-latest
             platform: win
-            artifact_name: VoiceTransleter-V2-Windows
+            artifact_name: VoiceTransleter-V2-CUDA-Windows
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -44,20 +42,21 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       - name: Install FFmpeg (Linux)
         if: matrix.platform == 'linux'
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Install FFmpeg (macOS)
-        if: matrix.platform == 'mac' || matrix.platform == 'mac-arm'
-        run: brew install ffmpeg
-
       - name: Install Python dependencies
+        # Проверка на CI, что зависимости вообще устанавливаются под Python
+        # 3.12 (версия, которую использует форк). Реальная установка с
+        # CUDA-версией torch происходит у конечного пользователя при первом
+        # запуске приложения (см. python_deps.ts) — CI-раннеры без GPU не
+        # могут проверить сам CUDA-инференс, только то, что пакеты ставятся.
         run: |
           python -m pip install --upgrade pip
-          pip install faster-whisper TTS
+          pip install faster-whisper "coqui-tts[codec]" "transformers==4.57.6"
         continue-on-error: true
 
       - name: Install Node.js dependencies
@@ -65,14 +64,6 @@ jobs:
 
       - name: Build app
         run: npx electron-vite build
-
-      - name: Build macOS (x64 + arm64)
-        if: matrix.platform == 'mac' || matrix.platform == 'mac-arm'
-        run: npx electron-builder --mac
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-          PYTHON_PATH: python3
 
       - name: Build Linux
         if: matrix.platform == 'linux'
@@ -91,8 +82,6 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: |
-            dist/*.dmg
-            dist/*.zip
             dist/*.AppImage
             dist/*.deb
             dist/*.exe
@@ -119,25 +108,30 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release
-          find artifacts -type f \( -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name 'latest*.yml' \) -exec cp {} release/ \;
+          find artifacts -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name 'latest*.yml' \) -exec cp {} release/ \;
           ls -lh release/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: VoiceTransleter V2 ${{ github.ref_name }}
+          name: VoiceTransleter V2 CUDA fork ${{ github.ref_name }}
           body: |
-            ## VoiceTransleter V2 ${{ github.ref_name }}
+            ## VoiceTransleter V2 (CUDA fork) ${{ github.ref_name }}
+
+            CUDA-версия форка — требует NVIDIA GPU для полноценного ускорения
+            (работает и на CPU через автоматический fallback, но без ускорения).
 
             ### Downloads
             - **Windows**: `.exe` installer
-            - **macOS Intel**: `.dmg`
-            - **macOS Apple Silicon**: `.dmg`
             - **Linux**: `.AppImage` / `.deb`
 
-            ### Note
-            Requires **FFmpeg** and **Python 3.10+** with `faster-whisper` and `TTS` packages installed.
+            macOS не собирается — ни Intel, ни Apple Silicon Mac не имеют
+            NVIDIA CUDA, весь смысл этого форка теряется без GPU-ускорения.
+            Для macOS используйте [оригинальный проект](https://github.com/AndranikFutureLabs/VoiceTransleter_V2).
+
+            ### Требования
+            **FFmpeg** и **Python 3.12** с `faster-whisper` и `coqui-tts` — ставятся автоматически при первом запуске приложения, либо вручную (см. README).
           files: release/*
           draft: false
           prerelease: false
