@@ -1,0 +1,64 @@
+appId: com.voice-transleter.app
+productName: VoiceTransleter V2
+copyright: Copyright © 2026 AndranikFutureLabs
+directories:
+  buildResources: resources
+  output: dist
+
+files:
+  - out/**/*
+  - "!node_modules/**/.cache/**"
+  - "!node_modules/onnxruntime-node/bin/napi-v3/darwin/**"
+  - "!node_modules/onnxruntime-node/bin/napi-v3/linux/**"
+  - "!node_modules/onnxruntime-node/bin/napi-v3/arm/**"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: resources/icon.png
+  legalTrademarks: AndranikFutureLabs
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  uninstallDisplayName: "VoiceTransleter V2"
+
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  icon: resources/icon.png
+  category: public.app-category.video
+  hardenedRuntime: false
+  gatekeeperAssess: false
+
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+  icon: resources/icon.png
+  category: AudioVideo
+  maintainer: AndranikFutureLabs
+
+extraResources:
+  - from: resources/
+    to: ./
+    filter:
+      - "**/*"
+  - from: scripts/
+    to: scripts/
+    filter:
+      - "**/*"
+  - from: logo.jpg
+    to: logo.jpg
+    filter:
+      - "**/*"

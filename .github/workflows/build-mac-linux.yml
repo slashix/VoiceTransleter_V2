@@ -1,0 +1,145 @@
+name: Build All Platforms
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            platform: mac
+            artifact_name: VoiceTransleter-V2-macOS
+          - os: macos-14
+            platform: mac-arm
+            artifact_name: VoiceTransleter-V2-macOS-ARM
+          - os: ubuntu-22.04
+            platform: linux
+            artifact_name: VoiceTransleter-V2-Linux
+          - os: windows-latest
+            platform: win
+            artifact_name: VoiceTransleter-V2-Windows
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install FFmpeg (Linux)
+        if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install FFmpeg (macOS)
+        if: matrix.platform == 'mac' || matrix.platform == 'mac-arm'
+        run: brew install ffmpeg
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install faster-whisper TTS
+        continue-on-error: true
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Build app
+        run: npx electron-vite build
+
+      - name: Build macOS (x64 + arm64)
+        if: matrix.platform == 'mac' || matrix.platform == 'mac-arm'
+        run: npx electron-builder --mac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          PYTHON_PATH: python3
+
+      - name: Build Linux
+        if: matrix.platform == 'linux'
+        run: npx electron-builder --linux
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Windows
+        if: matrix.platform == 'win'
+        run: npx electron-builder --win
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.exe
+            dist/latest*.yml
+          if-no-files-found: warn
+          retention-days: 30
+
+  release:
+    name: Publish Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name 'latest*.yml' \) -exec cp {} release/ \;
+          ls -lh release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: VoiceTransleter V2 ${{ github.ref_name }}
+          body: |
+            ## VoiceTransleter V2 ${{ github.ref_name }}
+
+            ### Downloads
+            - **Windows**: `.exe` installer
+            - **macOS Intel**: `.dmg`
+            - **macOS Apple Silicon**: `.dmg`
+            - **Linux**: `.AppImage` / `.deb`
+
+            ### Note
+            Requires **FFmpeg** and **Python 3.10+** with `faster-whisper` and `TTS` packages installed.
+          files: release/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
