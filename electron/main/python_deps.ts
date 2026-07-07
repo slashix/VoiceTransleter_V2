@@ -1,20 +1,24 @@
-import { execSync, execFileSync } from 'child_process'
+import { execSync, execFileSync, execFile } from 'child_process'
+import { promisify } from 'util'
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
 import { getPythonCommand } from './platform'
 
+const execFileAsync = promisify(execFile)
+
 /**
  * Check if a Python package is importable.
- * Uses execFileSync (no shell) to avoid quoting/escaping issues that can
- * arise with execSync's shell interpolation on some Linux configurations.
+ * Uses ASYNC execFile (not execFileSync) — this specific check can take
+ * 30-90+ seconds on first run (torch/CUDA/cuDNN initialization for heavy
+ * packages like TTS), and a synchronous call would block the entire Node
+ * event loop, freezing any heartbeat/progress output in a CLI context.
  */
-function isPythonPackageInstalled(pkgName: string): boolean {
+async function isPythonPackageInstalled(pkgName: string): Promise<boolean> {
   const py = getPythonCommand()
   try {
-    execFileSync(py, ['-c', `import ${pkgName}`], {
-      stdio: 'pipe',
-      timeout: 180000, // TTS/torch с CUDA-инициализацией может стартовать 30-60+ сек на первом прогоне
+    await execFileAsync(py, ['-c', `import ${pkgName}`], {
+      timeout: 90000, // TTS/torch с CUDA-инициализацией может стартовать 30-60+ сек на первом прогоне
       encoding: 'utf-8',
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
     })
@@ -47,16 +51,15 @@ function isPipPackageInstalled(pkgName: string): boolean {
  * Install a Python package via pip.
  * Logs progress to onLog callback.
  */
-function installPythonPackage(
+async function installPythonPackage(
   pkgName: string,
   onLog?: (msg: string) => void,
   timeout: number = 600000
-): void {
+): Promise<void> {
   const py = getPythonCommand()
   onLog?.(`  📦 Установка ${pkgName}...`)
   try {
-    execFileSync(py, ['-m', 'pip', 'install', '--upgrade', pkgName], {
-      stdio: 'pipe',
+    await execFileAsync(py, ['-m', 'pip', 'install', '--upgrade', pkgName], {
       timeout,
       encoding: 'utf-8',
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
@@ -273,11 +276,17 @@ async function downloadAndInstallPython311(
     })
   } catch {}
 
-  // Install TTS (Coqui) — this is a large package, may take 10+ minutes
-  onLog?.('  📦 Установка TTS (Coqui, ~5-10 мин)...')
+  // Install TTS engine — coqui-tts (МОДЕРНИЗИРОВАННЫЙ ФОРК original TTS,
+  // который не поддерживается с 2024 года и не устанавливается на новых
+  // версиях Python/зависимостей). Оригинальный код здесь ставил "TTS" —
+  // заменено на "coqui-tts", чтобы Windows embedded-Python путь был
+  // консистентен с основным путём установки (см. isPythonPackageInstalled
+  // ниже, которая проверяет тот же самый пакет через import TTS — оба
+  // называют python-модуль одинаково, различается только имя pip-пакета).
+  onLog?.('  📦 Установка TTS-движка (coqui-tts, ~5-10 мин)...')
   try {
     const ttsResult = execSync(
-      `"${pyExe}" -m pip install --no-warn-script-location TTS`,
+      `"${pyExe}" -m pip install --no-warn-script-location "coqui-tts[codec]"`,
       {
         stdio: 'pipe',
         timeout: 1800000, // 30 minutes
@@ -285,7 +294,16 @@ async function downloadAndInstallPython311(
         encoding: 'utf-8',
       }
     )
-    onLog?.('  ✅ TTS установлен')
+    onLog?.('  ✅ coqui-tts установлен')
+
+    // transformers>=5.1 несовместим с coqui-tts (issue idiap/coqui-ai-TTS#558)
+    onLog?.('  📦 Фиксация версии transformers (совместимость с coqui-tts)...')
+    execSync(`"${pyExe}" -m pip install --no-warn-script-location "transformers==4.57.6"`, {
+      stdio: 'pipe',
+      timeout: 300000,
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+    })
+    onLog?.('  ✅ transformers зафиксирован на 4.57.6')
   } catch (err: any) {
     // Capture stderr for debugging
     const stderr = err.stderr?.toString() || ''
@@ -294,18 +312,18 @@ async function downloadAndInstallPython311(
     onLog?.(`  ⚠️ stdout: ${stdout.slice(-500)}`)
 
     // Try alternative: install with --no-deps then deps separately
-    onLog?.('  🔄 Повторная установка TTS (--no-build-isolation)...')
+    onLog?.('  🔄 Повторная установка coqui-tts (--no-build-isolation)...')
     try {
-      execSync(`"${pyExe}" -m pip install --no-warn-script-location --no-build-isolation TTS`, {
+      execSync(`"${pyExe}" -m pip install --no-warn-script-location --no-build-isolation "coqui-tts[codec]"`, {
         stdio: 'pipe',
         timeout: 1800000,
         env: { ...process.env, PYTHONIOENCODING: 'utf-8', PIP_DEFAULT_TIMEOUT: '300' },
       })
-      onLog?.('  ✅ TTS установлен (повтор)')
+      onLog?.('  ✅ coqui-tts установлен (повтор)')
     } catch (err2: any) {
       const stderr2 = err2.stderr?.toString() || ''
-      onLog?.(`  ❌ Ошибка TTS: ${stderr2.slice(-500)}`)
-      throw new Error(`Failed to install TTS: ${stderr2.slice(-300)}`)
+      onLog?.(`  ❌ Ошибка coqui-tts: ${stderr2.slice(-500)}`)
+      throw new Error(`Failed to install coqui-tts: ${stderr2.slice(-300)}`)
     }
   }
 
@@ -344,18 +362,20 @@ export interface PythonDepsStatus {
   tts: boolean
 }
 
-export function checkPythonDeps(): PythonDepsStatus {
+export async function checkPythonDeps(): Promise<PythonDepsStatus> {
   const pythonOk = isPythonAvailable()
   if (!pythonOk) {
     return { python: false, pythonVersion: '', pythonCompatible: false, fasterWhisper: false, tts: false }
   }
   const versionCheck = isPythonVersionCompatible()
+  const fasterWhisper = versionCheck.ok && await isPythonPackageInstalled('faster_whisper')
+  const tts = versionCheck.ok && await isPythonPackageInstalled('TTS')
   return {
     python: true,
     pythonVersion: versionCheck.version,
     pythonCompatible: versionCheck.ok,
-    fasterWhisper: versionCheck.ok && isPythonPackageInstalled('faster_whisper'),
-    tts: versionCheck.ok && isPythonPackageInstalled('TTS'),
+    fasterWhisper,
+    tts,
   }
 }
 
@@ -367,7 +387,7 @@ export async function ensurePythonDeps(
   onLog?: (msg: string) => void,
   onProgress?: (pct: number) => void
 ): Promise<void> {
-  const status = checkPythonDeps()
+  const status = await checkPythonDeps()
 
   if (!status.python) {
     // Python not found at all — try auto-install on Windows
@@ -406,7 +426,7 @@ export async function ensurePythonDeps(
         process.env.VOICE_TRANSLATOR_PYTHON = pyExe
         onLog?.('✅ Python 3.11 установлен и готов к работе')
         // Re-check with new Python
-        const newStatus = checkPythonDeps()
+        const newStatus = await checkPythonDeps()
         if (!newStatus.python) {
           throw new Error('Установленный Python 3.11 не найден')
         }
@@ -438,11 +458,25 @@ export async function ensurePythonDeps(
   onLog?.(`📦 Установка Python-зависимостей: ${missing.join(', ')}...`)
   onProgress?.(0.05)
 
+  // Оригинальный пакет "TTS" на PyPI не поддерживается с 2024 года и не
+  // ставится на актуальных версиях зависимостей — используем поддерживаемый
+  // форк "coqui-tts". Имя для проверки (import TTS — модуль внутри пакета
+  // называется одинаково у обоих) отличается от имени для pip install.
+  const PIP_PACKAGE_NAME: Record<string, string> = {
+    'TTS': 'coqui-tts[codec]',
+  }
+
   const total = missing.length
   let installed = 0
 
   for (const pkg of missing) {
-    installPythonPackage(pkg, onLog)
+    const pipName = PIP_PACKAGE_NAME[pkg] ?? pkg
+    await installPythonPackage(pipName, onLog)
+    if (pkg === 'TTS') {
+      // transformers>=5.1 несовместим с coqui-tts (issue idiap/coqui-ai-TTS#558)
+      onLog?.('  📦 Фиксация версии transformers (совместимость с coqui-tts)...')
+      await installPythonPackage('transformers==4.57.6', onLog)
+    }
     installed++
     onProgress?.(0.05 + (installed / total) * 0.15)
   }

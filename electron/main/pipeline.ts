@@ -1,6 +1,6 @@
 import { join } from 'path'
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
-import { app } from './electron_safe'
+import { app } from 'electron'
 import { loadWhisperModel, runWhisper, isWhisperReady } from './whisper'
 import { loadTtsModel, synthesizeSpeech, isTtsReady } from './tts'
 import { translateText, translateSegmentsBatch } from './translator'
